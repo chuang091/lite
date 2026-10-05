@@ -147,6 +147,7 @@ interface GitHubRepository {
   color: string | null;
   // A clone Lite already knows, which a session uses instead of cloning again.
   local: string | null;
+  recent: number | null;
 }
 
 interface GitHubRepositories {
@@ -296,11 +297,8 @@ export function NewSessionDialog({
   // The provider whose missing API key the user is supplying.
   const [keyFor, setKeyFor] = useState<KeyProvider>();
   const searchRef = useRef<HTMLInputElement>(null);
-  // The folders Lite's local sessions ran in, which GitHub's list is matched against for existing clones.
-  const knownRef = useRef<string[]>([]);
-  knownRef.current = [
-    ...new Set(sessions.flatMap((session) => (session.host || session.mode ? [] : [session.repo ?? session.cwd]))),
-  ];
+  const knownRef = useRef(recentFolders);
+  knownRef.current = recentFolders;
   const folderRef = useRef<HTMLInputElement>(null);
   const [showAllFolders, setShowAllFolders] = useState(false);
   const [folderProbes, setFolderProbes] = useState<Record<string, DirectoryProbe | null>>({});
@@ -459,7 +457,9 @@ export function NewSessionDialog({
   useEffect(() => {
     if (!isOpen || source !== "local") return;
     let disposed = false;
-    setFolderProbes({});
+    setFolderProbes((current) =>
+      Object.fromEntries(Object.entries(current).filter(([place]) => visibleFolders.includes(place))),
+    );
     for (const place of visibleFolders)
       void invoke<DirectoryProbe>("directory_probe", { path: place })
         .then((probe) => {
@@ -478,12 +478,9 @@ export function NewSessionDialog({
   const clonePath = (repository: GitHubRepository) =>
     repository.local ?? [repositoriesRoot, repository.name].join(separator);
   const listed = github?.repositories ?? [];
-  // The repositories Lite's own sessions ran in, newest first, wherever their clones are.
-  const recent: GitHubRepository[] = [];
-  for (const session of [...sessions].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))) {
-    const repository = listed.find((entry) => !session.host && session.repo === clonePath(entry));
-    if (repositoriesRoot && repository && !recent.includes(repository)) recent.push(repository);
-  }
+  const recent = listed
+    .filter((repository) => repository.recent !== null)
+    .sort((a, b) => Number(a.recent) - Number(b.recent));
   const known = new Map<string, GitHubRepository>();
   for (const repository of [...listed, ...(found?.repositories ?? [])])
     if (!known.has(fullName(repository).toLowerCase())) known.set(fullName(repository).toLowerCase(), repository);
