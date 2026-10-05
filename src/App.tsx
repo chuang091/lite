@@ -122,6 +122,7 @@ import { type Agent, defaultSessionName, folderName, repoName, type Session, ses
 import "./App.css";
 
 const STORAGE_KEY = "lite.sessions.v1";
+const RECENT_FOLDERS_KEY = "lite.recentFolders.v1";
 const WORKING_KEY = "lite.working.v1";
 const SESSION_VIEW_KEY = "lite.sessionView.v1";
 const REMOTE_SSH_KEY = "lite.remoteSsh.v1";
@@ -1578,6 +1579,33 @@ function commandAgent(command: string): Agent | undefined {
 
 function App() {
   const [sessions, setSessions] = useState<Session[]>(loadSessions);
+  const [recentFolders, setRecentFolders] = useState<string[]>(() => {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem(RECENT_FOLDERS_KEY) ?? "null");
+      if (Array.isArray(stored))
+        return [...new Set(stored.filter((path): path is string => typeof path === "string" && !!path))].slice(0, 20);
+    } catch {
+      // Older installs still have their session folders if history cannot be read.
+    }
+    return [
+      ...new Set(
+        [...sessions]
+          .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+          .filter((session) => !session.host && !session.mode)
+          .map((session) => (session.worktree ? (session.repo ?? session.cwd) : session.cwd)),
+      ),
+    ].slice(0, 20);
+  });
+  const rememberFolder = useCallback((session: Session) => {
+    if (session.host || session.mode) return;
+    const folder = session.worktree ? (session.repo ?? session.cwd) : session.cwd;
+    setRecentFolders((current) =>
+      current[0] === folder ? current : [folder, ...current.filter((path) => path !== folder)].slice(0, 20),
+    );
+  }, []);
+  useEffect(() => {
+    localStorage.setItem(RECENT_FOLDERS_KEY, JSON.stringify(recentFolders));
+  }, [recentFolders]);
   const [sessionView, setSessionView] = useState(loadSessionView);
   const [selectedId, setSelectedId] = useState(() => sessions[0]?.id ?? "");
   const [sessionVisit, setSessionVisit] = useState(0);
@@ -1764,6 +1792,7 @@ function App() {
   notificationsRef.current = notifications;
   closeRef.current = closeSession;
   openRef.current = (session) => {
+    rememberFolder(session);
     recentSessions.current = [session.id, ...recentSessions.current.filter((id) => id !== session.id)];
     clearAttention(session.id);
     setSelectedId(session.id);
@@ -2439,6 +2468,7 @@ function App() {
   function createSession(session: Session) {
     session = { ...session, createdAt: session.createdAt ?? Date.now() };
     resumed.current = session.id;
+    rememberFolder(session);
     recentSessions.current = [session.id, ...recentSessions.current];
     setSessions((current) => [session, ...current]);
     setSelectedId(session.id);
@@ -2615,6 +2645,7 @@ function App() {
     setStartingIds((current) => including(current, fresh.id));
     setSessions((current) => current.map((item) => (item.id === session.id ? fresh : item)));
     if (select) {
+      rememberFolder(fresh);
       setSelectedId(fresh.id);
       resumed.current = fresh.id;
     }
@@ -3875,6 +3906,7 @@ function App() {
             initialPath={newSessionPath}
             remoteSsh={remoteSsh}
             sessions={sessions}
+            recentFolders={recentFolders}
             onOpenChange={(open) => {
               setNewSessionOpen(open);
               // A welcome tile's choice is for the dialog it opened; the next opening is the user's own.

@@ -213,6 +213,7 @@ export function NewSessionDialog({
   initialPath,
   remoteSsh,
   sessions,
+  recentFolders,
   onOpenChange,
   onCreate,
   onGitHubSignIn,
@@ -224,6 +225,7 @@ export function NewSessionDialog({
   initialPath?: string;
   remoteSsh: boolean;
   sessions: Session[];
+  recentFolders: string[];
   onOpenChange: (open: boolean) => void;
   onCreate: (session: Session) => void;
   onGitHubSignIn: () => void;
@@ -300,6 +302,7 @@ export function NewSessionDialog({
     ...new Set(sessions.flatMap((session) => (session.host || session.mode ? [] : [session.repo ?? session.cwd]))),
   ];
   const folderRef = useRef<HTMLInputElement>(null);
+  const [showAllFolders, setShowAllFolders] = useState(false);
   const [folderProbes, setFolderProbes] = useState<Record<string, DirectoryProbe | null>>({});
   const codexChoice = CODEX_CHOICES.find((option) => option.id === codexId) ?? CODEX_CHOICES[0];
   const harnessChoice = (agent: Agent) =>
@@ -449,19 +452,15 @@ export function NewSessionDialog({
     };
   }, [github?.signedIn, isOpen, search, source]);
 
-  // Folders the user already ran sessions in, newest first, each asked once per opening which kind it is.
-  const recentFolders = useMemo(() => {
-    const folders: string[] = [];
-    for (const session of [...sessions].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))) {
-      const place = session.repo ?? session.cwd;
-      if (!session.host && !session.mode && !folders.includes(place)) folders.push(place);
-    }
-    return folders.slice(0, 6);
-  }, [sessions]);
+  const visibleFolders = useMemo(
+    () => (showAllFolders ? recentFolders : recentFolders.slice(0, 6)),
+    [recentFolders, showAllFolders],
+  );
   useEffect(() => {
     if (!isOpen || source !== "local") return;
     let disposed = false;
-    for (const place of recentFolders)
+    setFolderProbes({});
+    for (const place of visibleFolders)
       void invoke<DirectoryProbe>("directory_probe", { path: place })
         .then((probe) => {
           if (!disposed) setFolderProbes((current) => ({ ...current, [place]: probe }));
@@ -472,7 +471,7 @@ export function NewSessionDialog({
     return () => {
       disposed = true;
     };
-  }, [isOpen, recentFolders, source]);
+  }, [isOpen, visibleFolders, source]);
 
   const separator = repositoriesRoot.includes("\\") ? "\\" : "/";
   // Where a repository's clone is or will be: the one Lite knows, else its own under the repositories folder.
@@ -603,6 +602,7 @@ export function NewSessionDialog({
     }
     // A cancelled dialog stays mounted, so a name typed into it must not wait for the next session.
     if (!open) {
+      setShowAllFolders(false);
       setTitle("");
       setBranch("");
       setFlags("");
@@ -724,6 +724,7 @@ export function NewSessionDialog({
       localStorage.setItem(CHOICE_KEY, choice.id);
       setChoiceId(choice.id);
       setDirectory(undefined);
+      setShowAllFolders(false);
       setTitle("");
       setBranch("");
       setFlags("");
@@ -1348,13 +1349,14 @@ export function NewSessionDialog({
                   {!remote && recentFolders.length ? (
                     <div>
                       <p className={`px-1 pb-1 ${SECTION}`}>Recent folders</p>
-                      {recentFolders.map((place) => {
+                      {visibleFolders.map((place) => {
                         const probe = folderProbes[place];
                         const active = place === path.trim();
                         const remoteName = probe?.repository?.remote?.replace(/^https:\/\/[^/]+\//, "");
                         return (
                           <button
                             key={place}
+                            title={place}
                             type="button"
                             aria-pressed={active}
                             disabled={busy}
@@ -1381,13 +1383,27 @@ export function NewSessionDialog({
                             </span>
                             {probe === undefined ? null : (
                               <span className="max-w-40 shrink-0 truncate rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
-                                {remoteName ?? (probe?.repository ? "Git" : "Folder")}
+                                {probe?.exists === false
+                                  ? "Missing"
+                                  : (remoteName ?? (probe?.repository ? "Git" : "Folder"))}
                               </span>
                             )}
                             {active && confirmed ? readyMark : null}
                           </button>
                         );
                       })}
+                      {recentFolders.length > 6 ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={busy}
+                          aria-expanded={showAllFolders}
+                          onClick={() => setShowAllFolders((current) => !current)}
+                        >
+                          {showAllFolders ? "Show fewer" : `Show all ${recentFolders.length} folders`}
+                        </Button>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
