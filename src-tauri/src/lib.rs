@@ -2440,7 +2440,6 @@ struct GitHubRepository {
     color: Option<String>,
     // A clone Lite already knows, so starting a session fetches there instead of cloning again.
     local: Option<String>,
-    recent: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -2465,50 +2464,13 @@ fn list_github_repositories(
             repositories: Vec::new(),
         });
     };
-    let git = resolve_executable("git").unwrap_or_else(|| "git".into());
-    // Personal usage order, shared with Local Recent. Resolve only these bounded, known folders.
-    let mut clones: Vec<(String, PathBuf)> = Vec::new();
-    for path in known.iter().take(20) {
-        let Some(url) = origin_url(&git, Path::new(path)) else {
-            continue;
-        };
-        let Some(full) = url.strip_prefix("https://github.com/") else {
-            continue;
-        };
-        let Some((owner, name)) = full.split_once('/') else {
-            continue;
-        };
-        if github_name(owner).is_err()
-            || github_name(name).is_err()
-            || clones
-                .iter()
-                .any(|(seen, _)| seen.eq_ignore_ascii_case(full))
-        {
-            continue;
-        }
-        if let Ok(root) = main_checkout(&git, Path::new(path)) {
-            clones.push((full.to_lowercase(), root));
-        }
-    }
     let fields = "name owner { login } isPrivate pushedAt primaryLanguage { name color }";
     let query = query.trim();
     let mut command = Command::new(&gh);
     command.args(["api", "graphql"]);
     if query.is_empty() {
-        // Include used repositories even when they fall outside the viewer's first 50 results.
-        let recent = clones
-            .iter()
-            .enumerate()
-            .map(|(index, (full, _))| {
-                let (owner, name) = full.split_once('/').unwrap();
-                format!(
-                    "recent{index}: repository(owner: \"{owner}\", name: \"{name}\") {{ {fields} }}"
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
         command.args(["-f", &format!(
-            "query=query {{ viewer {{ repositories(first: 50, orderBy: {{field: PUSHED_AT, direction: DESC}}, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]) {{ nodes {{ {fields} }} }} }} {recent} }}"
+            "query=query {{ viewer {{ repositories(first: 50, orderBy: {{field: PUSHED_AT, direction: DESC}}, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]) {{ nodes {{ {fields} }} }} }} }}"
         )]);
     } else {
         // "owner/partial" narrows to one owner; anything else searches repository names.
@@ -2524,18 +2486,7 @@ fn list_github_repositories(
         ]);
     }
     let output = command.output().map_err(|error| error.to_string())?;
-    let body = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap_or_default();
-    // GitHub returns partial data when a remembered repository was deleted or access was revoked.
-    let unavailable_recent = body["data"]["viewer"]["repositories"]["nodes"].is_array()
-        && body["errors"].as_array().is_some_and(|errors| {
-            !errors.is_empty()
-                && errors.iter().all(|error| {
-                    error["path"][0]
-                        .as_str()
-                        .is_some_and(|path| path.starts_with("recent"))
-                })
-        });
-    if !output.status.success() && !unavailable_recent {
+    if !output.status.success() {
         let signed_in = Command::new(&gh)
             .args(["auth", "status"])
             .output()
@@ -2548,14 +2499,26 @@ fn list_github_repositories(
         }
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
     }
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
     let nodes = if query.is_empty() {
         &body["data"]["viewer"]["repositories"]["nodes"]
     } else {
         &body["data"]["search"]["nodes"]
     };
-    let nodes = nodes
-        .as_array()
-        .ok_or("GitHub returned no repository list")?;
+    // The clones Lite already knows — the folders its sessions ran in — by the GitHub repository each came
+    // from. Lite never looks further than that: it does not search the disk for repositories.
+    let git = resolve_executable("git").unwrap_or_else(|| "git".into());
+    let clones: HashMap<String, &String> = known
+        .iter()
+        .filter_map(|path| {
+            let url = origin_url(&git, Path::new(path))?;
+            Some((
+                url.strip_prefix("https://github.com/")?.to_lowercase(),
+                path,
+            ))
+        })
+        .collect();
     // The folders those clones sit in are where the user keeps repositories, so a repository is also
     // looked for by name beside them, and in the repositories folder.
     // The user's own folders come first, so their clone is found before a copy Lite made.
@@ -2569,18 +2532,14 @@ fn list_github_repositories(
             homes.push(home.to_path_buf());
         }
     }
-    let mut seen = HashSet::new();
     let repositories = nodes
-        .iter()
-        .chain((0..clones.len()).filter_map(|index| body["data"].get(format!("recent{index}"))))
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|node| {
             let owner = node["owner"]["login"].as_str()?;
             let name = node["name"].as_str()?;
             let full = format!("{owner}/{name}").to_lowercase();
-            if !seen.insert(full.clone()) {
-                return None;
-            }
-            let recent = clones.iter().position(|(name, _)| name == &full);
             Some(GitHubRepository {
                 owner: owner.to_owned(),
                 name: name.to_owned(),
@@ -2588,8 +2547,7 @@ fn list_github_repositories(
                 pushed_at: node["pushedAt"].as_str().map(str::to_owned),
                 language: node["primaryLanguage"]["name"].as_str().map(str::to_owned),
                 color: node["primaryLanguage"]["color"].as_str().map(str::to_owned),
-                recent,
-                local: recent.map(|index| path_text(&clones[index].1)).or_else(|| {
+                local: clones.get(&full).map(|path| path.to_string()).or_else(|| {
                     github_name(name).ok()?;
                     homes
                         .iter()

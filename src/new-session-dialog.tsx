@@ -15,7 +15,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 
 import { GitHubLogomark, GitLogomark, ProviderIcon } from "@/brand-icons";
 import { ActionIconButton, Button } from "@/components/ui/button";
@@ -147,7 +147,6 @@ interface GitHubRepository {
   color: string | null;
   // A clone Lite already knows, which a session uses instead of cloning again.
   local: string | null;
-  recent: number | null;
 }
 
 interface GitHubRepositories {
@@ -205,8 +204,8 @@ const pickRow = (active: boolean, ready: boolean) =>
         : "border-transparent hover:bg-accent/60",
   );
 
-// The mark a picked row carries once it is confirmed.
-const readyMark = <CircleCheck aria-label="Ready" className="size-4 shrink-0 text-success" />;
+// A row scrolls into view as it becomes the picked one, so the arrow keys never pick a row out of sight.
+const reveal = (row: HTMLButtonElement | null) => row?.scrollIntoView({ block: "nearest" });
 
 export function NewSessionDialog({
   open: isOpen,
@@ -226,6 +225,7 @@ export function NewSessionDialog({
   initialPath?: string;
   remoteSsh: boolean;
   sessions: Session[];
+  // The local folders sessions ran in, the latest first, including sessions since closed.
   recentFolders: string[];
   onOpenChange: (open: boolean) => void;
   onCreate: (session: Session) => void;
@@ -297,10 +297,16 @@ export function NewSessionDialog({
   // The provider whose missing API key the user is supplying.
   const [keyFor, setKeyFor] = useState<KeyProvider>();
   const searchRef = useRef<HTMLInputElement>(null);
-  const knownRef = useRef(recentFolders);
-  knownRef.current = recentFolders;
+  // The folders Lite's local sessions ran in, recently or now, which GitHub's list is matched against for
+  // existing clones.
+  const knownRef = useRef<string[]>([]);
+  knownRef.current = [
+    ...new Set([
+      ...recentFolders,
+      ...sessions.flatMap((session) => (session.host || session.mode ? [] : [session.repo ?? session.cwd])),
+    ]),
+  ];
   const folderRef = useRef<HTMLInputElement>(null);
-  const [showAllFolders, setShowAllFolders] = useState(false);
   const [folderProbes, setFolderProbes] = useState<Record<string, DirectoryProbe | null>>({});
   const codexChoice = CODEX_CHOICES.find((option) => option.id === codexId) ?? CODEX_CHOICES[0];
   const harnessChoice = (agent: Agent) =>
@@ -450,17 +456,11 @@ export function NewSessionDialog({
     };
   }, [github?.signedIn, isOpen, search, source]);
 
-  const visibleFolders = useMemo(
-    () => (showAllFolders ? recentFolders : recentFolders.slice(0, 6)),
-    [recentFolders, showAllFolders],
-  );
+  // Each recent folder is asked once per opening which kind it is.
   useEffect(() => {
     if (!isOpen || source !== "local") return;
     let disposed = false;
-    setFolderProbes((current) =>
-      Object.fromEntries(Object.entries(current).filter(([place]) => visibleFolders.includes(place))),
-    );
-    for (const place of visibleFolders)
+    for (const place of recentFolders)
       void invoke<DirectoryProbe>("directory_probe", { path: place })
         .then((probe) => {
           if (!disposed) setFolderProbes((current) => ({ ...current, [place]: probe }));
@@ -471,16 +471,18 @@ export function NewSessionDialog({
     return () => {
       disposed = true;
     };
-  }, [isOpen, visibleFolders, source]);
+  }, [isOpen, recentFolders, source]);
+
+  // The recent folders still on disk; one deleted since is not offered to be created again.
+  const folders = recentFolders.filter((place) => folderProbes[place]?.exists !== false);
 
   const separator = repositoriesRoot.includes("\\") ? "\\" : "/";
   // Where a repository's clone is or will be: the one Lite knows, else its own under the repositories folder.
   const clonePath = (repository: GitHubRepository) =>
     repository.local ?? [repositoriesRoot, repository.name].join(separator);
   const listed = github?.repositories ?? [];
-  const recent = listed
-    .filter((repository) => repository.recent !== null)
-    .sort((a, b) => Number(a.recent) - Number(b.recent));
+  // The repositories of the recent folders, in the same order, wherever their clones are.
+  const recent = recentFolders.flatMap((place) => listed.find((entry) => entry.local === place) ?? []);
   const known = new Map<string, GitHubRepository>();
   for (const repository of [...listed, ...(found?.repositories ?? [])])
     if (!known.has(fullName(repository).toLowerCase())) known.set(fullName(repository).toLowerCase(), repository);
@@ -599,7 +601,6 @@ export function NewSessionDialog({
     }
     // A cancelled dialog stays mounted, so a name typed into it must not wait for the next session.
     if (!open) {
-      setShowAllFolders(false);
       setTitle("");
       setBranch("");
       setFlags("");
@@ -721,7 +722,6 @@ export function NewSessionDialog({
       localStorage.setItem(CHOICE_KEY, choice.id);
       setChoiceId(choice.id);
       setDirectory(undefined);
-      setShowAllFolders(false);
       setTitle("");
       setBranch("");
       setFlags("");
@@ -831,12 +831,22 @@ export function NewSessionDialog({
     event.preventDefault();
     launch(agent);
   }
+  // The arrow keys move through the list under the field: GitHub's repositories, or the recent folders.
   function moveSelection(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     event.preventDefault();
-    const at = visible.findIndex((repository) => selected && fullName(repository) === fullName(selected));
-    const next = visible[Math.min(visible.length - 1, Math.max(0, at + (event.key === "ArrowDown" ? 1 : -1)))];
-    if (next) setSelectedName(fullName(next));
+    const names = source === "github" ? visible.map(fullName) : folders;
+    const at = names.indexOf(source === "github" ? (selected ? fullName(selected) : "") : path.trim());
+    const next = names[Math.min(names.length - 1, Math.max(0, at + (event.key === "ArrowDown" ? 1 : -1)))];
+    if (next && source === "github") setSelectedName(next);
+    else if (next) pickFolder(next);
+  }
+  // A picked folder fills the field, which keeps the focus so the arrow keys and Enter still work there.
+  function pickFolder(place: string) {
+    setPath(place);
+    setFolder("checking");
+    setRepo(undefined);
+    folderRef.current?.focus({ preventScroll: true });
   }
 
   const worktreeHere = worktreeOn && (source === "github" || (source === "local" && Boolean(repo)));
@@ -1189,9 +1199,13 @@ export function NewSessionDialog({
                                 <button
                                   key={fullName(repository)}
                                   type="button"
+                                  ref={active ? reveal : undefined}
                                   aria-pressed={active}
                                   disabled={busy}
-                                  onClick={() => setSelectedName(fullName(repository))}
+                                  onClick={() => {
+                                    setSelectedName(fullName(repository));
+                                    searchRef.current?.focus();
+                                  }}
                                   className={pickRow(active, confirmed)}
                                 >
                                   <Tile>
@@ -1235,7 +1249,6 @@ export function NewSessionDialog({
                                       {count} running
                                     </span>
                                   ) : null}
-                                  {active && confirmed ? readyMark : null}
                                 </button>
                               );
                             })}
@@ -1291,6 +1304,7 @@ export function NewSessionDialog({
                           aria-describedby={
                             folder === "missing" || folder === "other" ? "project-folder-status" : undefined
                           }
+                          onKeyDown={remote ? undefined : moveSelection}
                           onChange={(event) => {
                             setPath(event.target.value);
                             setFolder("checking");
@@ -1343,25 +1357,21 @@ export function NewSessionDialog({
                       </p>
                     ) : null}
                   </div>
-                  {!remote && recentFolders.length ? (
-                    <div>
+                  {!remote && folders.length ? (
+                    <div className="-mx-1 min-h-0 overflow-y-auto px-1">
                       <p className={`px-1 pb-1 ${SECTION}`}>Recent folders</p>
-                      {visibleFolders.map((place) => {
+                      {folders.map((place) => {
                         const probe = folderProbes[place];
                         const active = place === path.trim();
                         const remoteName = probe?.repository?.remote?.replace(/^https:\/\/[^/]+\//, "");
                         return (
                           <button
                             key={place}
-                            title={place}
                             type="button"
+                            ref={active ? reveal : undefined}
                             aria-pressed={active}
                             disabled={busy}
-                            onClick={() => {
-                              setPath(place);
-                              setFolder("checking");
-                              setRepo(undefined);
-                            }}
+                            onClick={() => pickFolder(place)}
                             className={pickRow(active, confirmed)}
                           >
                             <Tile>
@@ -1378,29 +1388,14 @@ export function NewSessionDialog({
                               <span className="truncate text-sm font-medium">{folderName(place) || place}</span>
                               <span className="truncate font-mono text-xs text-muted-foreground">{tilde(place)}</span>
                             </span>
-                            {probe === undefined ? null : (
+                            {remoteName ? (
                               <span className="max-w-40 shrink-0 truncate rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
-                                {probe?.exists === false
-                                  ? "Missing"
-                                  : (remoteName ?? (probe?.repository ? "Git" : "Folder"))}
+                                {remoteName}
                               </span>
-                            )}
-                            {active && confirmed ? readyMark : null}
+                            ) : null}
                           </button>
                         );
                       })}
-                      {recentFolders.length > 6 ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          disabled={busy}
-                          aria-expanded={showAllFolders}
-                          onClick={() => setShowAllFolders((current) => !current)}
-                        >
-                          {showAllFolders ? "Show fewer" : `Show all ${recentFolders.length} folders`}
-                        </Button>
-                      ) : null}
                     </div>
                   ) : null}
                 </div>
