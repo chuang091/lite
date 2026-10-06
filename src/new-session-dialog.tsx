@@ -1105,7 +1105,7 @@ export function NewSessionDialog({
       <DialogContent
         initialFocus={() => searchRef.current ?? folderRef.current ?? true}
         showCloseButton={!launching || Boolean(launching.error)}
-        className={launching ? "gap-0 p-5 sm:max-w-xs" : "gap-0 p-0 sm:h-[min(40rem,calc(100dvh-2rem))] sm:max-w-4xl"}
+        className={launching ? "gap-0 p-5 sm:max-w-xs" : "gap-0 p-0 sm:h-[min(45rem,calc(100dvh-2rem))] sm:max-w-4xl"}
       >
         {/* While a session starts, the dialog becomes its progress card. The choices stay mounted, so a
             failed step brings them back as they were, with the error. */}
